@@ -1,7 +1,52 @@
+from fastapi import FastAPI, UploadFile, File
+import uuid
+import os
+import shutil
+import whisper
+
+app = FastAPI()
+
+UPLOAD_DIR = "uploads"
+OUTPUT_DIR = "outputs"
+
+os.makedirs(UPLOAD_DIR, exist_ok=True)
+os.makedirs(OUTPUT_DIR, exist_ok=True)
+
+JOBS = {}
+
+@app.get("/")
+def home():
+    return {"status": "Autoclip AI pipeline running"}
+
+# ------------------------
+# UPLOAD VIDEO
+# ------------------------
+@app.post("/upload")
+async def upload_video(file: UploadFile = File(...)):
+
+    job_id = str(uuid.uuid4())
+
+    file_path = f"{UPLOAD_DIR}/{job_id}.mp4"
+
+    with open(file_path, "wb") as f:
+        shutil.copyfileobj(file.file, f)
+
+    JOBS[job_id] = {
+        "status": "uploaded",
+        "input": file_path,
+        "clips": []
+    }
+
+    return {
+        "job_id": job_id,
+        "status": "uploaded"
+    }
+
+# ------------------------
+# PROCESS VIDEO WITH WHISPER
+# ------------------------
 @app.post("/process/{job_id}")
 def process(job_id: str):
-
-    import whisper
 
     if job_id not in JOBS:
         return {"error": "job not found"}
@@ -10,14 +55,10 @@ def process(job_id: str):
 
     video_path = JOBS[job_id]["input"]
 
-    # ------------------------
-    # LOAD WHISPER MODEL
-    # ------------------------
-    model = whisper.load_model("base")
+    # Load smaller Whisper model for Render stability
+    model = whisper.load_model("tiny")
 
-    # ------------------------
-    # TRANSCRIBE VIDEO
-    # ------------------------
+    # Transcribe video
     result = model.transcribe(video_path)
 
     segments = result["segments"]
@@ -44,3 +85,11 @@ def process(job_id: str):
         "status": "done",
         "clips": clips
     }
+
+# ------------------------
+# CHECK STATUS
+# ------------------------
+@app.get("/status/{job_id}")
+def status(job_id: str):
+
+    return JOBS.get(job_id, {"error": "not found"})
