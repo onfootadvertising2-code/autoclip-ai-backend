@@ -3,7 +3,7 @@ import uuid
 import os
 import shutil
 import json
-import whisper
+import redis
 
 app = FastAPI()
 
@@ -12,10 +12,17 @@ JOB_FILE = "jobs.json"
 
 os.makedirs(UPLOAD_DIR, exist_ok=True)
 
+# ----------------------------
+# REDIS (QUEUE SYSTEM)
+# ----------------------------
+r = redis.Redis(host="localhost", port=6379, decode_responses=True)
 
-# ------------------------
-# JOB STORAGE
-# ------------------------
+QUEUE_NAME = "autoclip_jobs"
+
+
+# ----------------------------
+# LOCAL JOB STORE (fallback)
+# ----------------------------
 def load_jobs():
     try:
         with open(JOB_FILE, "r") as f:
@@ -31,17 +38,17 @@ def save_jobs(jobs):
 JOBS = load_jobs()
 
 
-# ------------------------
+# ----------------------------
 # HEALTH CHECK
-# ------------------------
+# ----------------------------
 @app.get("/")
 def home():
-    return {"status": "Autoclip AI AI pipeline running"}
+    return {"status": "Autoclip AI production API running"}
 
 
-# ------------------------
-# UPLOAD VIDEO
-# ------------------------
+# ----------------------------
+# UPLOAD VIDEO → CREATE JOB
+# ----------------------------
 @app.post("/upload")
 async def upload_video(file: UploadFile = File(...)):
 
@@ -53,78 +60,27 @@ async def upload_video(file: UploadFile = File(...)):
     with open(file_path, "wb") as f:
         shutil.copyfileobj(file.file, f)
 
-    JOBS[job_id] = {
-        "status": "uploaded",
-        "input": file_path,
-        "clips": []
+    job_data = {
+        "job_id": job_id,
+        "status": "queued",
+        "input": file_path
     }
 
+    JOBS[job_id] = job_data
     save_jobs(JOBS)
+
+    # PUSH TO REDIS QUEUE (worker will pick this up later)
+    r.lpush(QUEUE_NAME, json.dumps(job_data))
 
     return {
         "job_id": job_id,
-        "status": "uploaded"
+        "status": "queued"
     }
 
 
-# ------------------------
-# PROCESS (AI ENABLED - SAFE VERSION)
-# ------------------------
-@app.post("/process/{job_id}")
-def process(job_id: str):
-
-    global JOBS
-    JOBS = load_jobs()
-
-    if job_id not in JOBS:
-        return {"error": "job not found"}
-
-    JOBS[job_id]["status"] = "processing"
-    save_jobs(JOBS)
-
-    try:
-        video_path = JOBS[job_id]["input"]
-
-        # Load SMALL Whisper model (critical for Render stability)
-        model = whisper.load_model("tiny")
-
-        result = model.transcribe(video_path)
-
-        clips = []
-
-        for i, seg in enumerate(result["segments"]):
-            clips.append({
-                "clip_id": f"{job_id}_clip_{i}",
-                "start": round(seg["start"], 2),
-                "end": round(seg["end"], 2),
-                "text": seg["text"].strip()
-            })
-
-        JOBS[job_id]["clips"] = clips
-        JOBS[job_id]["status"] = "done"
-        save_jobs(JOBS)
-
-        return {
-            "job_id": job_id,
-            "status": "done",
-            "clips": clips
-        }
-
-    except Exception as e:
-
-        JOBS[job_id]["status"] = "error"
-        save_jobs(JOBS)
-
-        return {
-            "job_id": job_id,
-            "status": "error",
-            "message": str(e)
-        }
-
-
-# ------------------------
-# STATUS
-# ------------------------
+# ----------------------------
+# GET JOB STATUS
+# ----------------------------
 @app.get("/status/{job_id}")
 def status(job_id: str):
 
@@ -132,3 +88,21 @@ def status(job_id: str):
     JOBS = load_jobs()
 
     return JOBS.get(job_id, {"error": "not found"})
+
+
+# ----------------------------
+# WORKER UPDATE ENDPOINT (used by backend worker later)
+# ----------------------------
+@app.post("/update/{job_id}")
+def update_job(job_id: str, data: dict):
+
+    global JOBS
+    JOBS = load_jobs()
+
+    if job_id not in JOBS:
+        return {"error": "job not found"}
+
+    JOBS[job_id].update(data)
+    save_jobs(JOBS)
+
+    return {"status": "updated", "job_id": job_id}
