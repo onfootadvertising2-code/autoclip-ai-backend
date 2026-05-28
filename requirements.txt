@@ -1,5 +1,4 @@
-fastapi
-uvicorn
-python-multipart
 redis
-uuid
+openai-whisper
+ffmpeg-python
+moviepy
